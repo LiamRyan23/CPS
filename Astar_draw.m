@@ -80,7 +80,7 @@ function map = create_base_map()
 end
 
 function draw_map(hAxes, map)
-    cla(hAxes);
+    cla(hAxes);g
     imshow(1 - map, 'Parent', hAxes);
     colormap(hAxes, gray);
     axis(hAxes, 'equal');
