@@ -18,6 +18,28 @@ uri = uri_helper.uri_from_env(default='radio://0/5/2M/EE5C21CF04')
 # Parmeters set in loggin function
 initial_position = [0,0,0]
 
+def rotate_clock(sequence):
+    rotated_sequence = []
+    for pos in sequence:
+        x = pos[0]
+        y = pos[1]
+        z = pos[2]
+        new_x = y
+        new_y = -x
+        rotated_sequence.append((new_x, new_y, z))
+    return rotated_sequence
+
+def rotate_counterclock(sequence):
+    rotated_sequence = []
+    for pos in sequence:
+        x = pos[0]
+        y = pos[1]
+        z = pos[2]
+        new_x = -y
+        new_y = x
+        rotated_sequence.append((new_x, new_y, z))
+    return rotated_sequence
+
 def read_path_waypoints(csv_file='path.csv'):
     points = []
     try:
