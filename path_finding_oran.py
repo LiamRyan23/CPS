@@ -85,7 +85,7 @@ def read_path_waypoints(csv_file='path.csv'):
         normalized_waypoints = []
         for point in waypoints:
             # Convert to tuples with height 0.4
-            normalized_waypoints.append(((point[0] - offset_x)/10, -(point[1] - offset_y)/10, 0.23))
+            normalized_waypoints.append(((point[0] - offset_x)/10, -(point[1] - offset_y)/10, 0.15))
         return normalized_waypoints
     
     return waypoints
@@ -113,7 +113,7 @@ def read_all_blocks(csv_file='path.csv'):
     normalized_blocks = []
     for block in blocks:
         # Convert to tuples with height 4
-        normalized_blocks.append(((block[0] - offset_x)/10, -(block[1] - offset_y)/10, 0.23))
+        normalized_blocks.append(((block[0] - offset_x)/10, -(block[1] - offset_y)/10, 0.15))
     
     return normalized_blocks
 
@@ -135,14 +135,8 @@ def param_deck_flow(_, value_str):
         flow_deck_attached_event.set()
 
 def over_obstacle():
-    global shutter_readings
-    if len(shutter_readings) < MAX_READINGS:
-        return False  # Not enough readings yet
-    
-    # Calculate moving average of last 10 readings
-    moving_average = sum(shutter_readings) / len(shutter_readings)
-    print(f"Moving average of shutter readings: {moving_average}")
-    return moving_average > COLOUR_THRESHOLD
+    global shutter_num
+    return shutter_num > COLOUR_THRESHOLD
 
 def update_csv(obstacle_position):
     """Convert normalized coordinates back to original space and log to obstacles.csv"""
@@ -150,21 +144,21 @@ def update_csv(obstacle_position):
     
     # Convert obstacle position back to original coordinate space
     # Reverse the transformation: multiply by 10, negate y, add offset
-    obstacle_x = int(obstacle_position[1] * 10 + offset_x)
-    obstacle_y = int(-obstacle_position[0] * 10 + offset_y)
-
+    obstacle_x = int(obstacle_position[0] * 10 + offset_x)
+    obstacle_y = int(-obstacle_position[1] * 10 + offset_y)
+    
     
     # Write to obstacles.csv file
     try:
         with open('obstacles.csv', 'a', newline='') as file:
             writer = csv.writer(file)
             writer.writerow([obstacle_x, obstacle_y])
+        print(f"Logged obstacle at ({obstacle_x},{obstacle_y}))")
     except Exception as e:
         print(f"Error writing to obstacles.csv: {e}")
 
 def run_sequence(scf, sequence, base_x, base_y, base_z, yaw):
     cf = scf.cf
-    prior_position = None
     obstacle_detected = False
 
     # Arm the Crazyflie
@@ -184,21 +178,27 @@ def run_sequence(scf, sequence, base_x, base_y, base_z, yaw):
 
         print(f"Reached position {position}")
         
-        if i > 1:
-            for j in range(50):
-                if over_obstacle():
-                    print("Obstacle detected!")
-                    obstacle_detected = True
-                    for k in range(20):
-                        cf.commander.send_position_setpoint(initial_position[0], initial_position[1], 0.23, yaw)
-                        time.sleep(0.1)
-                    update_csv(position)
-                    break
-                time.sleep(0.01)
+        # Check for obstacle over multiple readings     
+        black = 0
+        for j in range(50):
+            if over_obstacle():
+                # print("Over black")
+                black = black + 1
+            time.sleep(0.01)
+
+
+        print(f"Black count: {black}")
+        if black >= 45 and i != 0:
+            for j in range(30):
+                cf.commander.send_position_setpoint(initial_position[0], initial_position[1], 0.2, yaw)
+                time.sleep(0.1)
+            obstacle_detected = True
+            update_csv(position)
+            print("Obstacle detected!")
 
         if obstacle_detected:
-            obstacle_detected = False
             break
+
 
     cf.commander.send_stop_setpoint()
     # Hand control over to the high level commander to avoid timeout and locking of the Crazyflie
@@ -209,20 +209,15 @@ def run_sequence(scf, sequence, base_x, base_y, base_z, yaw):
     time.sleep(0.1)
 
 def log_stab_callback(timestamp, data, logconf):
-    global estimated_position, shutter_num, shutter_readings
+    global estimated_position, shutter_num
     estimated_position[0] = data['stateEstimate.x']
     estimated_position[1] = data['stateEstimate.y']
     estimated_position[2] = data['stateEstimate.z']
     shutter_num = data['motion.shutter']
     
     # Add new reading to the list
-    shutter_readings.append(shutter_num)
     
-    # Keep only the last MAX_READINGS readings
-    if len(shutter_readings) > MAX_READINGS:
-        shutter_readings.pop(0)
-
-    if timestamp % 200 == 0:  # Print every 200th callback to reduce output
+    if timestamp % 2000 == 0:  # Print every 200th callback to reduce output
         print('[%d][%s]: %s' % (timestamp, logconf.name, data))
 
 def simple_log_async(scf, logconf):
@@ -244,18 +239,29 @@ if __name__ == '__main__':
     logconf.add_variable('stateEstimate.z', 'float')
     logconf.add_variable('motion.shutter', 'uint16_t')
 
-
-    print("Initial position: ", estimated_position[0], estimated_position[1], estimated_position[1])
-    with SyncCrazyflie(uri, cf=Crazyflie(rw_cache='./cache')) as scf:
-        scf.cf.param.add_update_callback(group='deck', name='bcFlow2',
-                                        cb=param_deck_flow)
-        simple_log_async(scf, logconf)
-        time.sleep(0.1)
-        set_initial_position(scf, estimated_position[0], estimated_position[1], estimated_position[2], initial_yaw)
-        reset_estimator(scf)
-        if skip_blocks:
-            sequence = read_path_waypoints('path.csv')
-        else:
-            sequence = read_all_blocks('path.csv')
-        sequence = rotate_clock(sequence)
-        run_sequence(scf, sequence, estimated_position[0], estimated_position[1], estimated_position[2], initial_yaw)
+    while True:
+        print("Initial position: ", estimated_position[0], estimated_position[1], estimated_position[1])
+        with SyncCrazyflie(uri, cf=Crazyflie(rw_cache='./cache')) as scf:
+            scf.cf.param.add_update_callback(group='deck', name='bcFlow2',
+                                            cb=param_deck_flow)
+            simple_log_async(scf, logconf)
+            time.sleep(0.1)
+            set_initial_position(scf, estimated_position[0], estimated_position[1], estimated_position[2], initial_yaw)
+            reset_estimator(scf)
+            
+            if skip_blocks:
+                sequence = read_path_waypoints('path.csv')
+            else:
+                sequence = read_all_blocks('path.csv')
+            # sequence = rotate_clock(sequence)
+            run_sequence(scf, sequence, estimated_position[0], estimated_position[1], estimated_position[2], initial_yaw)
+        
+        while True:
+            response = input("Run the sequence again? (y/n): ").lower().strip()
+            if response in ['y', 'yes']:
+                break
+            elif response in ['n', 'no']:
+                print("Exiting program.")
+                exit()
+            else:
+                print("Please enter 'y' for yes or 'n' for no.")

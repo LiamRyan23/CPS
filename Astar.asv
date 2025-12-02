@@ -242,8 +242,6 @@ function load_obstacles(hAxes)
             disp('obstacles.csv not found');
             return;
         end
-
-        map = getappdata(hAxes, 'map');
         
         % Read the CSV file
         coords = readmatrix('obstacles.csv');
