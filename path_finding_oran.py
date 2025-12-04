@@ -23,12 +23,25 @@ initial_position = [0,0,0]
 shutter_num = 0
 shutter_readings = []  # Store last 10 readings for moving average
 MAX_READINGS = 10
-COLOUR_THRESHOLD = 2250
+COLOUR_THRESHOLD = 3500
 skip_blocks = False
 
 # Global variables to store offset for coordinate conversion
 offset_x = 0
 offset_y = 0
+
+def rotate_sequence(sequence, theta):
+    rotated_sequence = []
+    cos_theta = math.cos(theta)
+    sin_theta = math.sin(theta)
+    for pos in sequence:
+        x = pos[0]
+        y = pos[1]
+        z = pos[2]
+        new_x = x * cos_theta - y * sin_theta
+        new_y = x * sin_theta + y * cos_theta
+        rotated_sequence.append((new_x, new_y, z))
+    return rotated_sequence
 
 def rotate_clock(sequence):
     rotated_sequence = []
@@ -188,9 +201,9 @@ def run_sequence(scf, sequence, base_x, base_y, base_z, yaw):
 
 
         print(f"Black count: {black}")
-        if black >= 45 and i != 0:
+        if black >= 40 and i != 0:
             for j in range(30):
-                cf.commander.send_position_setpoint(initial_position[0], initial_position[1], 0.2, yaw)
+                cf.commander.send_position_setpoint(initial_position[0], initial_position[1], 0.15, yaw)
                 time.sleep(0.1)
             obstacle_detected = True
             update_csv(position)
@@ -231,7 +244,7 @@ if __name__ == '__main__':
 
     # Set these to the position and yaw based on how your Crazyflie is placed
     # on the floor
-    initial_yaw = 90  # In degrees
+    initial_yaw = 90 # In degrees
 
     logconf = LogConfig(name='pos', period_in_ms=10)
     logconf.add_variable('stateEstimate.x', 'float')
@@ -254,6 +267,7 @@ if __name__ == '__main__':
             else:
                 sequence = read_all_blocks('path.csv')
             # sequence = rotate_clock(sequence)
+            rotate_sequence(sequence, math.radians(0))
             run_sequence(scf, sequence, estimated_position[0], estimated_position[1], estimated_position[2], initial_yaw)
         
         while True:
