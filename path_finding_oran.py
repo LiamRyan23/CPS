@@ -30,6 +30,98 @@ skip_blocks = False
 offset_x = 0
 offset_y = 0
 
+class CrazyflieMapCalibrator:
+    def __init__(self):
+        # 4 corner calibration points - UPDATE these with cfclient measurements
+        self.lighthouse_coords = {
+            (2, 15):  (-0.31, -0.18),   # Start (your observed)
+            (2, 2):   (-0.31, 1.12),    # UPDATE: Bottom-left corner
+            (15, 2):  (1.00, 1.12),     # UPDATE: Bottom-right corner  
+            (15, 15): (1.00, -0.20),    # End (your observed)
+        }
+        
+        self.scale_x = 0.0
+        self.scale_y = 0.0
+        self.origin_x = 0.0
+        self.origin_y = 0.0
+        self.rotation = 0.0
+        
+        self.calculate_transformation()
+    
+    def calculate_transformation(self):
+        """Calculate transformation using corner points"""
+        print("📐 Calculating Crazyflie coordinate transformation...")
+        
+        # Get corner coordinates
+        start_grid, start_real = (2, 15), self.lighthouse_coords[(2, 15)]
+        bottom_left_grid, bottom_left_real = (2, 2), self.lighthouse_coords[(2, 2)]
+        bottom_right_grid, bottom_right_real = (15, 2), self.lighthouse_coords[(15, 2)]
+        end_grid, end_real = (15, 15), self.lighthouse_coords[(15, 15)]
+        
+        # Calculate scale factors using maximum distances
+        grid_y_dist = abs(start_grid[1] - bottom_left_grid[1])  # 13 units
+        real_y_dist = abs(start_real[1] - bottom_left_real[1])
+        self.scale_y = real_y_dist / grid_y_dist
+        
+        grid_x_dist = abs(bottom_right_grid[0] - bottom_left_grid[0])  # 13 units
+        real_x_dist = abs(bottom_right_real[0] - bottom_left_real[0])
+        self.scale_x = real_x_dist / grid_x_dist
+        
+        # Calculate origin offset
+        self.origin_x = start_real[0] - start_grid[0] * self.scale_x
+        self.origin_y = start_real[1] - start_grid[1] * self.scale_y
+        
+        # Calculate rotation
+        expected_angle = 0
+        actual_angle = math.atan2(bottom_right_real[1] - bottom_left_real[1], 
+                                bottom_right_real[0] - bottom_left_real[0])
+        self.rotation = actual_angle - expected_angle
+        
+        print(f"✅ Calibration: X={self.scale_x:.4f}m/grid, Y={self.scale_y:.4f}m/grid, Rot={math.degrees(self.rotation):.1f}°")
+    
+    def grid_to_crazyflie_coords(self, grid_x, grid_y, height=0.15):
+        """Transform grid coordinates to Crazyflie lighthouse coordinates"""
+        # Apply scaling
+        scaled_x = grid_x * self.scale_x
+        scaled_y = grid_y * self.scale_y
+        
+        # Apply rotation if map is tilted
+        if abs(self.rotation) > 0.01:
+            cos_r, sin_r = math.cos(self.rotation), math.sin(self.rotation)
+            rotated_x = scaled_x * cos_r - scaled_y * sin_r
+            rotated_y = scaled_x * sin_r + scaled_y * cos_r
+        else:
+            rotated_x, rotated_y = scaled_x, scaled_y
+        
+        # Apply origin offset for lighthouse positioning
+        crazyflie_x = rotated_x + self.origin_x
+        crazyflie_y = rotated_y + self.origin_y
+        
+        return (crazyflie_x, crazyflie_y, height)
+    
+    def crazyflie_to_grid_coords(self, cf_x, cf_y):
+        """Reverse transformation: Crazyflie coordinates back to grid"""
+        # Remove origin offset
+        relative_x = cf_x - self.origin_x
+        relative_y = cf_y - self.origin_y
+        
+        # Reverse rotation
+        if abs(self.rotation) > 0.01:
+            cos_r, sin_r = math.cos(-self.rotation), math.sin(-self.rotation)
+            unrotated_x = relative_x * cos_r - relative_y * sin_r
+            unrotated_y = relative_x * sin_r + relative_y * cos_r
+        else:
+            unrotated_x, unrotated_y = relative_x, relative_y
+        
+        # Reverse scaling
+        grid_x = round(unrotated_x / self.scale_x)
+        grid_y = round(unrotated_y / self.scale_y)
+        
+        return (grid_x, grid_y)
+
+# Global calibrator instance
+calibrator = CrazyflieMapCalibrator()
+
 def rotate_clock(sequence):
     rotated_sequence = []
     for pos in sequence:
@@ -91,31 +183,27 @@ def read_path_waypoints(csv_file='path.csv'):
     return waypoints
 
 def read_all_blocks(csv_file='path.csv'):
-    """Read all individual blocks/cells from CSV and return them as a sequence with height 4"""
+    """Read all individual blocks/cells from CSV and return them as calibrated lighthouse coordinates"""
     blocks = []
     try:
         with open(csv_file, 'r') as file:
             reader = csv.reader(file)
             for row in reader:
                 if len(row) >= 2:
-                    x, y = float(row[0]), float(row[1])
-                    blocks.append([x, y])
+                    grid_x, grid_y = int(row[0]), int(row[1])
+                    
+                    # Convert to Crazyflie lighthouse coordinates using calibration
+                    cf_coords = calibrator.grid_to_crazyflie_coords(grid_x, grid_y)
+                    blocks.append(cf_coords)
+                    
     except FileNotFoundError:
         print(f"CSV file {csv_file} not found")
         return []
     
-    if not blocks:
-        return []
+    if blocks:
+        print(f"✅ Loaded {len(blocks)} calibrated waypoints")
     
-    # Normalize blocks similar to waypoints but with height 4
-    global offset_x, offset_y
-    offset_x, offset_y = blocks[0][0], blocks[0][1]
-    normalized_blocks = []
-    for block in blocks:
-        # Convert to tuples with height 4
-        normalized_blocks.append(((block[0] - offset_x)/10, -(block[1] - offset_y)/10, 0.15))
-    
-    return normalized_blocks
+    return blocks
 
 def set_initial_position(scf, x, y, z, yaw_deg):
     scf.cf.param.set_value('kalman.initialX', x)
@@ -139,21 +227,18 @@ def over_obstacle():
     return shutter_num > COLOUR_THRESHOLD
 
 def update_csv(obstacle_position):
-    """Convert normalized coordinates back to original space and log to obstacles.csv"""
-    global offset_x, offset_y
+    """Convert Crazyflie coordinates back to grid coordinates and log obstacle"""
     
-    # Convert obstacle position back to original coordinate space
-    # Reverse the transformation: multiply by 10, negate y, add offset
-    obstacle_x = int(obstacle_position[0] * 10 + offset_x)
-    obstacle_y = int(-obstacle_position[1] * 10 + offset_y)
-    
+    # Convert from Crazyflie coordinates back to grid coordinates using calibrator
+    grid_coords = calibrator.crazyflie_to_grid_coords(obstacle_position[0], obstacle_position[1])
+    grid_x, grid_y = grid_coords
     
     # Write to obstacles.csv file
     try:
         with open('obstacles.csv', 'a', newline='') as file:
             writer = csv.writer(file)
-            writer.writerow([obstacle_x, obstacle_y])
-        print(f"Logged obstacle at ({obstacle_x},{obstacle_y}))")
+            writer.writerow([grid_x, grid_y])
+        print(f"🚨 Obstacle logged: Grid({grid_x},{grid_y}) from CF({obstacle_position[0]:.3f},{obstacle_position[1]:.3f})")
     except Exception as e:
         print(f"Error writing to obstacles.csv: {e}")
 
