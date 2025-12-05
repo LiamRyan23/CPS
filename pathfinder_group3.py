@@ -1,3 +1,10 @@
+## @file pathfinder_group3.py
+#  @brief Drone path finding and obstacle avoidance system using Crazyflie
+#  @details This module provides autonomous flight capabilities for a Crazyflie drone,
+#           including path planning, obstacle detection, and coordinate system management.
+#  @author Group 3
+#  @date December 2025
+
 import math
 import time
 import logging
@@ -12,24 +19,41 @@ from cflib.crazyflie.syncLogger import SyncLogger
 from cflib.crazyflie.log import LogConfig
 from cflib.utils.reset_estimator import reset_estimator
 
-# URI to the Crazyflie to connect to
+## @brief URI to the Crazyflie to connect to
 uri = uri_helper.uri_from_env(default='radio://0/5/2M/EE5C21CF04')
 
+## @brief Event to track flow deck attachment status
 flow_deck_attached_event = Event()
 
-estimated_position = [0,0,0]        # x, y, z params used in logging
-initial_position = [0,0,0]          # x, y, z params used for Kalman filter initialization
-shutter_num = 0                     # Current shutter reading
-MAX_READINGS = 10                   # Threshold for how many black readings to be over obstavle
-COLOUR_THRESHOLD = 3500             # Threshold for shutter to consider black
-skip_blocks = False                 # If true, read waypoints instead of all blocks (won't avoid obstacles)
+## @brief Current estimated position [x, y, z] used in logging
+estimated_position = [0,0,0]
 
-# Global variables to store offset for coordinate conversion
+## @brief Initial position [x, y, z] used for Kalman filter initialization
+initial_position = [0,0,0]
+
+## @brief Current shutter reading from motion sensor
+shutter_num = 0
+
+## @brief Threshold for how many black readings to be over obstacle
+MAX_READINGS = 10
+
+## @brief Threshold for shutter reading to consider surface as black/obstacle
+COLOUR_THRESHOLD = 3500
+
+## @brief If true, read waypoints instead of all blocks (won't avoid obstacles)
+skip_blocks = False
+
+## @brief Global X offset for coordinate conversion from original to normalized space
 offset_x = 0
+
+## @brief Global Y offset for coordinate conversion from original to normalized space
 offset_y = 0
 
-# Rotates the drone path about the Z axis
-# Used to correct when the mat is not alligend with global lighthouse coordinates 
+## @brief Rotates the drone path about the Z axis
+#  @details Used to correct when the mat is not aligned with global lighthouse coordinates
+#  @param sequence List of position tuples (x, y, z) to rotate
+#  @param theta Rotation angle in radians
+#  @return List of rotated position tuples
 def rotate_sequence(sequence, theta):
     rotated_sequence = []
     cos_theta = math.cos(theta)
@@ -43,9 +67,11 @@ def rotate_sequence(sequence, theta):
         rotated_sequence.append((new_x, new_y, z))
     return rotated_sequence
 
-# Reads path waypoints from matlab CSV and returns a simplified sequence
-# Seuqence contains only turning points and start/end points
-# Can only detecct new obstacles at corners and will miss obstacles in straight paths
+## @brief Reads path waypoints from MATLAB CSV and returns a simplified sequence
+#  @details Sequence contains only turning points and start/end points.
+#           Can only detect new obstacles at corners and will miss obstacles in straight paths.
+#  @param csv_file Path to the CSV file containing waypoint data
+#  @return List of normalized waypoint tuples (x, y, z)
 def read_path_waypoints(csv_file='path.csv'):
     points = []
     try:
@@ -84,10 +110,11 @@ def read_path_waypoints(csv_file='path.csv'):
     
     return waypoints
 
-# Reads all blocks from Matlab CSV and returns them as a sequence
-# Allows for drone to stop at each block and detect new obstacles
+## @brief Reads all blocks from MATLAB CSV and returns them as a sequence
+#  @details Allows for drone to stop at each block and detect new obstacles
+#  @param csv_file Path to the CSV file containing block data
+#  @return List of normalized block position tuples (x, y, z)
 def read_all_blocks(csv_file='path.csv'):
-    """Read all individual blocks/cells from CSV and return them as a sequence with height 4"""
     blocks = []
     try:
         with open(csv_file, 'r') as file:
@@ -113,7 +140,12 @@ def read_all_blocks(csv_file='path.csv'):
     
     return normalized_blocks
 
-# Sets the initial position for the Kalman filter
+## @brief Sets the initial position for the Kalman filter
+#  @param scf SyncCrazyflie object
+#  @param x Initial X coordinate
+#  @param y Initial Y coordinate
+#  @param z Initial Z coordinate
+#  @param yaw_deg Initial yaw angle in degrees
 def set_initial_position(scf, x, y, z, yaw_deg):
     scf.cf.param.set_value('kalman.initialX', x)
     scf.cf.param.set_value('kalman.initialY', y)
@@ -126,21 +158,25 @@ def set_initial_position(scf, x, y, z, yaw_deg):
     yaw_radians = math.radians(yaw_deg)
     scf.cf.param.set_value('kalman.initialYaw', yaw_radians)
 
-# Checks of flow deck is attached
+## @brief Checks if flow deck is attached
+#  @param _ Unused parameter (parameter name)
+#  @param value_str String value indicating flow deck status
 def param_deck_flow(_, value_str):
     value = int(value_str)
     if value:
         flow_deck_attached_event.set()
 
-# Checks if the drone is over an obstacle based on shutter reading
+## @brief Checks if the drone is over an obstacle based on shutter reading
+#  @return True if shutter reading exceeds COLOUR_THRESHOLD, False otherwise
 def over_obstacle():
     global shutter_num
     return shutter_num > COLOUR_THRESHOLD
 
-# Updates the obstacles.csv file with detected obstacle position
-# This CSV can then be read by Matlab to update the path
+## @brief Updates the obstacles.csv file with detected obstacle position
+#  @details This CSV can then be read by MATLAB to update the path.
+#           Converts normalized coordinates back to original space.
+#  @param obstacle_position Normalized position tuple (x, y, z) of detected obstacle
 def update_csv(obstacle_position):
-    """Convert normalized coordinates back to original space and log to obstacles.csv"""
     global offset_x, offset_y
     
     # Convert obstacle position back to original coordinate space
@@ -158,10 +194,16 @@ def update_csv(obstacle_position):
     except Exception as e:
         print(f"Error writing to obstacles.csv: {e}")
 
-# Given a sequence of posstions will fly the drone through them
-# Checks for obstacles at each position and logs them if detected
-# Sets stating point as (0,0,0) and moves relative to that point instead of gloabal lighthouse coordinates
-# Takse 0.5 seconds to move from point to point
+## @brief Flies the drone through a given sequence of positions
+#  @details Checks for obstacles at each position and logs them if detected.
+#           Sets starting point as (0,0,0) and moves relative to that point instead of global lighthouse coordinates.
+#           Takes approximately 0.5 seconds to move from point to point.
+#  @param scf SyncCrazyflie object
+#  @param sequence List of position tuples to fly through
+#  @param base_x Base X coordinate offset
+#  @param base_y Base Y coordinate offset
+#  @param base_z Base Z coordinate offset
+#  @param yaw Yaw angle in degrees
 def run_sequence(scf, sequence, base_x, base_y, base_z, yaw):
     cf = scf.cf
     obstacle_detected = False
@@ -183,7 +225,7 @@ def run_sequence(scf, sequence, base_x, base_y, base_z, yaw):
 
         print(f"Reached position {position}")
         
-        # Check for obstacle over multiple readings     
+        ## @brief Check for obstacle over multiple readings to reduce false positives
         black = 0
         for j in range(50):
             if over_obstacle():
@@ -212,9 +254,12 @@ def run_sequence(scf, sequence, base_x, base_y, base_z, yaw):
     # since the message queue is not flushed before closing
     time.sleep(0.1)
 
-# Logging functon that updates estimated position and shutter reading
-# These varibles are needed  to determine what direction to move and if over obstacle
-# Callback is called every 10ms as per log config
+## @brief Logging callback function that updates estimated position and shutter reading
+#  @details These variables are needed to determine what direction to move and if over obstacle.
+#           Callback is called every 10ms as per log config.
+#  @param timestamp Current timestamp
+#  @param data Dictionary containing logged data values
+#  @param logconf Log configuration object
 def log_stab_callback(timestamp, data, logconf):
     global estimated_position, shutter_num
     estimated_position[0] = data['stateEstimate.x']
@@ -225,20 +270,23 @@ def log_stab_callback(timestamp, data, logconf):
     if timestamp % 2000 == 0:  # Print every 200th callback to reduce output
         print('[%d][%s]: %s' % (timestamp, logconf.name, data))
 
-# initializes logging with the given log configuration
+## @brief Initializes logging with the given log configuration
+#  @param scf SyncCrazyflie object
+#  @param logconf Log configuration object to start
 def simple_log_async(scf, logconf):
     cf = scf.cf
     cf.log.add_config(logconf)
     logconf.data_received_cb.add_callback(log_stab_callback)
     logconf.start()
 
-# Main program logic starts here
-# 1) Sets up logging, 
-# 2) Sets up initial position, 
-# 3) reads path from Matlab CSV (chhoses waypoints or all blocks), 
-# 4) Rotates path if needed 
-# 5) Runs the sequence
-# 6) Prompts user to run again or exit
+## @brief Main program entry point
+#  @details Main program logic:
+#           1. Sets up logging
+#           2. Sets up initial position
+#           3. Reads path from MATLAB CSV (chooses waypoints or all blocks)
+#           4. Rotates path if needed
+#           5. Runs the sequence
+#           6. Prompts user to run again or exit
 if __name__ == '__main__':
     cflib.crtp.init_drivers()
 
@@ -277,3 +325,8 @@ if __name__ == '__main__':
                 exit()
             else:
                 print("Please enter 'y' for yes or 'n' for no.")
+
+
+
+                ## @todo Update firmware, remove the restart yes/no, have it land nicely at the start so it can find path well
+                ## @todo Clear obstacle.csv before starting new run
