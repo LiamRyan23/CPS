@@ -17,19 +17,19 @@ uri = uri_helper.uri_from_env(default='radio://0/5/2M/EE5C21CF04')
 
 flow_deck_attached_event = Event()
 
-# Parmeters set in loggin function
-estimated_position = [0,0,0]
-initial_position = [0,0,0]
-shutter_num = 0
-shutter_readings = []  # Store last 10 readings for moving average
-MAX_READINGS = 10
-COLOUR_THRESHOLD = 3500
-skip_blocks = False
+estimated_position = [0,0,0]        # x, y, z params used in logging
+initial_position = [0,0,0]          # x, y, z params used for Kalman filter initialization
+shutter_num = 0                     # Current shutter reading
+MAX_READINGS = 10                   # Threshold for how many black readings to be over obstavle
+COLOUR_THRESHOLD = 3500             # Threshold for shutter to consider black
+skip_blocks = False                 # If true, read waypoints instead of all blocks (won't avoid obstacles)
 
 # Global variables to store offset for coordinate conversion
 offset_x = 0
 offset_y = 0
 
+# Rotates the drone path about the Z axis
+# Used to correct when the mat is not alligend with global lighthouse coordinates 
 def rotate_sequence(sequence, theta):
     rotated_sequence = []
     cos_theta = math.cos(theta)
@@ -43,28 +43,9 @@ def rotate_sequence(sequence, theta):
         rotated_sequence.append((new_x, new_y, z))
     return rotated_sequence
 
-def rotate_clock(sequence):
-    rotated_sequence = []
-    for pos in sequence:
-        x = pos[0]
-        y = pos[1]
-        z = pos[2]
-        new_x = y
-        new_y = -x
-        rotated_sequence.append((new_x, new_y, z))
-    return rotated_sequence
-
-def rotate_counterclock(sequence):
-    rotated_sequence = []
-    for pos in sequence:
-        x = pos[0]
-        y = pos[1]
-        z = pos[2]
-        new_x = -y
-        new_y = x
-        rotated_sequence.append((new_x, new_y, z))
-    return rotated_sequence
-
+# Reads path waypoints from matlab CSV and returns a simplified sequence
+# Seuqence contains only turning points and start/end points
+# Can only detecct new obstacles at corners and will miss obstacles in straight paths
 def read_path_waypoints(csv_file='path.csv'):
     points = []
     try:
@@ -103,6 +84,8 @@ def read_path_waypoints(csv_file='path.csv'):
     
     return waypoints
 
+# Reads all blocks from Matlab CSV and returns them as a sequence
+# Allows for drone to stop at each block and detect new obstacles
 def read_all_blocks(csv_file='path.csv'):
     """Read all individual blocks/cells from CSV and return them as a sequence with height 4"""
     blocks = []
@@ -130,6 +113,7 @@ def read_all_blocks(csv_file='path.csv'):
     
     return normalized_blocks
 
+# Sets the initial position for the Kalman filter
 def set_initial_position(scf, x, y, z, yaw_deg):
     scf.cf.param.set_value('kalman.initialX', x)
     scf.cf.param.set_value('kalman.initialY', y)
@@ -142,15 +126,19 @@ def set_initial_position(scf, x, y, z, yaw_deg):
     yaw_radians = math.radians(yaw_deg)
     scf.cf.param.set_value('kalman.initialYaw', yaw_radians)
 
+# Checks of flow deck is attached
 def param_deck_flow(_, value_str):
     value = int(value_str)
     if value:
         flow_deck_attached_event.set()
 
+# Checks if the drone is over an obstacle based on shutter reading
 def over_obstacle():
     global shutter_num
     return shutter_num > COLOUR_THRESHOLD
 
+# Updates the obstacles.csv file with detected obstacle position
+# This CSV can then be read by Matlab to update the path
 def update_csv(obstacle_position):
     """Convert normalized coordinates back to original space and log to obstacles.csv"""
     global offset_x, offset_y
@@ -170,6 +158,10 @@ def update_csv(obstacle_position):
     except Exception as e:
         print(f"Error writing to obstacles.csv: {e}")
 
+# Given a sequence of posstions will fly the drone through them
+# Checks for obstacles at each position and logs them if detected
+# Sets stating point as (0,0,0) and moves relative to that point instead of gloabal lighthouse coordinates
+# Takse 0.5 seconds to move from point to point
 def run_sequence(scf, sequence, base_x, base_y, base_z, yaw):
     cf = scf.cf
     obstacle_detected = False
@@ -195,7 +187,6 @@ def run_sequence(scf, sequence, base_x, base_y, base_z, yaw):
         black = 0
         for j in range(50):
             if over_obstacle():
-                # print("Over black")
                 black = black + 1
             time.sleep(0.01)
 
@@ -221,29 +212,37 @@ def run_sequence(scf, sequence, base_x, base_y, base_z, yaw):
     # since the message queue is not flushed before closing
     time.sleep(0.1)
 
+# Logging functon that updates estimated position and shutter reading
+# These varibles are needed  to determine what direction to move and if over obstacle
+# Callback is called every 10ms as per log config
 def log_stab_callback(timestamp, data, logconf):
     global estimated_position, shutter_num
     estimated_position[0] = data['stateEstimate.x']
     estimated_position[1] = data['stateEstimate.y']
     estimated_position[2] = data['stateEstimate.z']
     shutter_num = data['motion.shutter']
-    
-    # Add new reading to the list
-    
+        
     if timestamp % 2000 == 0:  # Print every 200th callback to reduce output
         print('[%d][%s]: %s' % (timestamp, logconf.name, data))
 
+# initializes logging with the given log configuration
 def simple_log_async(scf, logconf):
     cf = scf.cf
     cf.log.add_config(logconf)
     logconf.data_received_cb.add_callback(log_stab_callback)
     logconf.start()
 
+# Main program logic starts here
+# 1) Sets up logging, 
+# 2) Sets up initial position, 
+# 3) reads path from Matlab CSV (chhoses waypoints or all blocks), 
+# 4) Rotates path if needed 
+# 5) Runs the sequence
+# 6) Prompts user to run again or exit
 if __name__ == '__main__':
     cflib.crtp.init_drivers()
 
-    # Set these to the position and yaw based on how your Crazyflie is placed
-    # on the floor
+
     initial_yaw = 90 # In degrees
 
     logconf = LogConfig(name='pos', period_in_ms=10)
@@ -255,8 +254,7 @@ if __name__ == '__main__':
     while True:
         print("Initial position: ", estimated_position[0], estimated_position[1], estimated_position[1])
         with SyncCrazyflie(uri, cf=Crazyflie(rw_cache='./cache')) as scf:
-            scf.cf.param.add_update_callback(group='deck', name='bcFlow2',
-                                            cb=param_deck_flow)
+            scf.cf.param.add_update_callback(group='deck', name='bcFlow2', cb=param_deck_flow)
             simple_log_async(scf, logconf)
             time.sleep(0.1)
             set_initial_position(scf, estimated_position[0], estimated_position[1], estimated_position[2], initial_yaw)
@@ -266,7 +264,7 @@ if __name__ == '__main__':
                 sequence = read_path_waypoints('path.csv')
             else:
                 sequence = read_all_blocks('path.csv')
-            # sequence = rotate_clock(sequence)
+            
             rotate_sequence(sequence, math.radians(0))
             run_sequence(scf, sequence, estimated_position[0], estimated_position[1], estimated_position[2], initial_yaw)
         
